@@ -19,6 +19,8 @@ __all__ = [
 # # ------------------- SCAN ------------------------
 	"scan",           #(rootpath,exceptions=set())->file_tree
 	"calc_hashes",    #(->root,old_root,prefix)
+	"tree_stat",      #(tree) -> (size, dirs, files, bad_files)
+	"tree_select",    #(tree,pred) -> tree
 # # ------------------- DIFF --------------
 	"first_diff",     #(old_root,root) -> True or (path,(old,new))
 	"path_diff",      #(old_root,root) -> (modified,old,new,strict_old,strict_new,touched)
@@ -165,6 +167,11 @@ def scan(rootpath,exceptions=set()):
 
 	label = HTML()
 	display(label)
+	errors = {}
+	def append(root,path,val):
+		path = path[len(rootpath):].split(os.sep)
+		parent = make_subtree(root,path[:-1])
+		parent[path[-1]] = val
 
 	def scan1(curpath):
 		nonlocal total_size
@@ -176,19 +183,28 @@ def scan(rootpath,exceptions=set()):
 		try:
 			with os.scandir(curpath) as it:
 				for entry in it:
-					if entry.name!='.' and entry.name!='..':
-						if entry.is_dir(follow_symlinks=False):
-							curroot[entry.name] = scan1(entry.path)
-						elif entry.is_file(follow_symlinks=False):
-							st = entry.stat(follow_symlinks=False)
-							curroot[entry.name] = [st.st_mtime,st.st_size]
-							total_size+=st.st_size
-						elif not entry.is_symlink() and not is_winlink(entry.path):
-							print('unknown object:',entry.path)
+					try:
+						if entry.name!='.' and entry.name!='..' and \
+						 not entry.is_symlink() and not is_winlink(entry.path):
+							if entry.is_dir(follow_symlinks=False):
+								curroot[entry.name] = scan1(entry.path)
+							elif entry.is_file(follow_symlinks=False):
+								st = entry.stat(follow_symlinks=False)
+								curroot[entry.name] = [st.st_mtime,st.st_size]
+								total_size+=st.st_size
+							else:
+								print('unknown object:',entry.path)
+								append(errors,entry.path,[-1,-1,None])
+					except OSError as e:
+						#print(curpath+os.sep+entry.name)
+						append(errors,curpath+os.sep+entry.name,[-1,-1,None])
+						print(e)
+						#print()
 		except OSError as e:
-			print(curpath)
+			#print(curpath+os.sep)
+			append(errors,curpath,{})
 			print(e)
-			print()
+			#print()
 			return {}
 		if ts_printed<int(total_size/1024/1024/1024):
 			ts_printed = int(total_size/1024/1024/1024)
@@ -196,7 +212,7 @@ def scan(rootpath,exceptions=set()):
 		return curroot
 	tmp = scan1(rootpath)
 	label.value = str(ts_printed)+' GB scanned - completed'
-	return tmp
+	return tmp, errors
 
 
 # In[8]:
@@ -215,22 +231,26 @@ def md5(fname):
 # In[9]:
 
 
-def calc_hashes(root,old_root,prefix):
+def calc_hashes(root,errors,old_root,prefix):
 	total_size = 0
+	calc_size = 0
 	ts_printed = 0
 	label = HTML()
-	display(label)
+	def append(root,path,val):
+		parent = make_subtree(root,path[:-1])
+		parent[path[-1]] = val
 
 	def calc_hashes1(root,old_root,path):
 		nonlocal total_size
 		nonlocal ts_printed
+		nonlocal calc_size
 		
 		for name in root.keys():
 			if type(root[name])==dict: # directory
 				if name in old_root and type(old_root[name])==dict:
-					calc_hashes1(root[name],old_root[name],path+[name])
+					calc_hashes1(root[name],old_root[name],path+(name,))
 				else:
-					calc_hashes1(root[name],{},path+[name])
+					calc_hashes1(root[name],{},path+(name,))
 			elif type(root[name])==list: # file
 				assert len(root[name])>=2
 				if name in old_root and type(old_root[name])==list and	\
@@ -244,8 +264,10 @@ def calc_hashes(root,old_root,prefix):
 					p = my_path_join_a(prefix,*path,name)
 					try:
 						#print(p)
-						os.stat(p)  # зависает при чтении некоторых файлов
-									# stat от этих файлов будет ошибкой
+						st = os.stat(p)  # зависает при чтении некоторых файлов
+										# stat от этих файлов будет ошибкой
+						root[name][0] = st.st_mtime # update
+						root[name][1] = st.st_size # update
 						if len(root[name])==2:
 							root[name].append(md5(p))
 						else:
@@ -254,21 +276,63 @@ def calc_hashes(root,old_root,prefix):
 						if len(root[name])==2:
 							root[name].append(None)
 						print(p)
+						append(errors,path+(name,),root[name])
 						print(e)
 						print()
-					
+					assert type(root[name][1]) == int, path+(name,)
+					calc_size+=root[name][1]
 				if type(root[name][1])==int:
 					total_size+=root[name][1]
 				if ts_printed<int(total_size/1024/1024/1024):
 					ts_printed = int(total_size/1024/1024/1024)
-					label.value = str(ts_printed)+' GB calculated'
+					label.value = str(ts_printed)+' GB total, '+\
+						str(int(calc_size/1024/1024/1024))+' GB calculated ('+str(int(100*calc_size/total_size))+'%)'
 			else:
 				raise BaseException(path)
-				
-	calc_hashes1(root,old_root,[])
-	label.value = str(ts_printed)+' GB calculated - completed'
+	if old_root!={} and len(root.keys()&old_root.keys())==0:
+		print('intersection root and old_root is void, do nothng, check old_root')
+	else:
+		if old_root=={} : print('calculating from scatch')
+		display(label)
+		calc_hashes1(root,old_root,())
+		label.value = str(ts_printed)+' GB calculated, '+\
+			str(int(calc_size/1024/1024/1024))+' GB calculated ('+str(int(100*calc_size/total_size))+'%)- completed'
 
 
+def tree_stat(tree):
+	if type(tree)==list:
+		if len(tree)<3 or tree[2]==None:
+			return (tree[1],0,1,1)
+		else:
+			return (tree[1],0,1,0)
+	elif type(tree)==dict:
+		size = 0
+		dirs = 1
+		files = 0
+		bad_files = 0
+		for k,v in tree.items():
+			(s,d,f,b) = tree_stat(v)
+			size+=s
+			dirs+=d
+			files+=f
+			bad_files+=b
+		return 	(size, dirs, files, bad_files)
+
+	else: raise BaseException()
+
+def tree_select(tree,pred):
+	assert type(tree)==dict
+	new_tree = {}
+	for k,v in tree.items():
+		if type(v)==list:
+			if pred(v):
+				new_tree[k]=v
+		else:
+			tmp = tree_select(v,pred)
+			if len(tmp)>0:
+				new_tree[k]=tmp
+	return new_tree
+	
 # # ------------------- DIFF --------------
 
 def first_diff(old_root,root):
@@ -328,7 +392,7 @@ def path_diff(old_root,root):
 					assert len(old_root[name])==3
 					if root[name][2]!=None and root[name][2]==old_root[name][2]:
 						# same files
-						assert root[name][1]==old_root[name][1], path_name
+						assert root[name][1]==old_root[name][1], ('different sizes', path_name, root[name][1], old_root[name][1])
 						if abs(root[name][0]-old_root[name][0])>1:
 							touched[path_name] = (old_root[name], root[name])
 					elif root[name][2]==None and root[name][2]==old_root[name][2] and \
@@ -412,20 +476,6 @@ def dvr(fun):
 	return wrapper
 	
 
-# In[13]:
-
-
-def make_files(old):
-	old_files = {}
-	for p1,subtree in old.items():
-		for p2,v in tree_iterator(subtree):
-			if v[2] not in old_files:
-				old_files[v[2]] = set()
-			#print(p1,p2,tuple(p2))#,p1+tuple(p2))
-			old_files[v[2]].add(p1+tuple(p2))
-	return old_files
-
-
 # In[14]:
 
 
@@ -487,7 +537,7 @@ def make_moved(old_files,new_files,old,new,verbose):
 		subtree - данный объект
 		"""
 		if type(subtree)==list:
-			if subtree[2] in new_files:
+			if subtree[2]!=None and subtree[2] in new_files:
 				return new_files[subtree[2]] # ? copy - не нужно, т.к. (1)
 			else: return set()
 		elif type(subtree)==dict:
@@ -649,6 +699,15 @@ def hash_diff(old,new,verbose=1):
 	new = deepcopy(new)
 
 	# создаю old_files, new_files
+	def make_files(old):
+		old_files = {}
+		for p1,subtree in old.items():
+			for p2,v in tree_iterator(subtree):
+				if v[2] not in old_files:
+					old_files[v[2]] = set()
+				#print(p1,p2,tuple(p2))#,p1+tuple(p2))
+				old_files[v[2]].add(p1+p2)
+		return old_files
 	old_files = make_files(old)
 	new_files = make_files(new)
 
@@ -861,15 +920,11 @@ import json, codecs
 
 def myjson_load(hash_path):
 	"""загружаем хэши, вычисляем хэши, сохраняем хэши"""
-	try:
-		with codecs.open(hash_path,'r', encoding='utf-8') as file:
-			old_root = file.read()
-			old_root = json.loads(old_root)
-			print('readed',hash_path)
-			print(old_root.keys())
-	except BaseException as e:
-		print(e)
-		old_root = {}
+	with codecs.open(hash_path,'r', encoding='utf-8') as file:
+		old_root = file.read()
+		old_root = json.loads(old_root)
+		print('readed',hash_path)
+		print(old_root.keys())
 	return old_root
 
 def myjson_dumps(old_root):
@@ -882,7 +937,7 @@ def myjson_dump(old_root,hash_path):
 			s = myjson_dumps(old_root)
 			file.write(s)
 			print('writed',hash_path)
-	except BasicException as e:
+	except BaseException as e:
 		print('start writing with exception',e)
 		with codecs.open(hash_path,'w', encoding='utf-8') as file:
 			s = myjson_dumps(old_root)
@@ -968,21 +1023,21 @@ def tree_dump(root):
 def tree_load(root):
 	if type(root)==str:
 		# root[2] обычно строка, но иногда это None
-		s = s.split(' ')
-		s[0] = float(s[0])
-		s[1] = int(s[1])
-		if s[2]=='None': s[2]=None
-		return s
+		root = root.split(' ')
+		root[0] = None if root[0]=='None' else float(root[0])
+		root[1] = None if root[1]=='None' else int(root[1])
+		if root[2]=='None': root[2]=None
+		return root
 	else:
 		new_root = {}
 		for name in root.keys():
 			assert type(name)==str, name
 			tmp = tree_load(root[name])
-			tmp_name = name.split('/')
+			tmp_name = tuple(name.split('/'))
 			while len(tmp_name)>1:
 				tmp = {tmp_name[-1]:tmp}
 				tmp_name = tmp_name[:-1]
-			new_root[tmp_name] = tmp
+			new_root[tmp_name[0]] = tmp
 		return new_root
 
 # In[21]:
