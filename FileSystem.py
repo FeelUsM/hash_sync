@@ -13,9 +13,20 @@ __all__ = [
 	"my_path_join_a", #(*seq)->str
 	"my_path_join_l", #(seq)->str
 	"tree_iterator",  #(tree) yield (path,obj)
+	"tree_pred_iterator",  #(tree) yield (path,pred,k)
 	"get_subtree",    #(root,path) -> obj
-	"make_subtree",   #(root,path) -> obj
+	"make_subdir",   #(root,path) -> obj
+	"set_subtree",	  #(root,path,obj) -> None
 	"is_subpath",     #(long_path,short_path)->bool
+	#сжатие путей и файлов в одну строку
+	"nested_join",    	#(root,splitter='/')->root
+	"nested_split",   	#(root,splitter='/')->root
+	#деревья <-> списки
+	"pathlist2tree",	#(ll,ender='\0')->tree
+	"tree2pathlist",	#(tree,ender='\0')->ll
+	#слияние деревьев
+	"tree_join",		#(dict_tree,ender='\0')->tree
+	"tree_split",		#(tree,ender='\0')->dict_tree
 # # ------------------- SCAN ------------------------
 	"scan",           #(rootpath,exceptions=set())->file_tree
 	"calc_hashes",    #(->root,old_root,prefix)
@@ -28,27 +39,45 @@ __all__ = [
 # # ---------------------- PATCH, SYNC -------------------------
 	"path_patch",     #(old_root,modified,old,new, touched = {}) -> new_root
 	"hash_patch",     #(old_root,modified,moved,old_dirs,new_dirs,old,new, touched={}) -> new_root
-	# path_patch_back
+	"path_back_patch",
 	"hash_back_patch",#(new_root,modified,moved,old_dirs,new_dirs,old,new, touched={}) -> old_root
 	# path_sync
 	# hash_sync
-# # --------------------- DUMP, LOAD --------------------
-	"myjson_load",    #(path)->obj
-	"myjson_dump",    #(obj,path)
-	"myjson_dumps",   #(obj)->str
-	"clear_json_comment",#(obj)->obj
-	#сжатие путей и файлов в одну строку
-	"tree_dump",      #(root)->root
-	"tree_load",      #(root)->root
+# # --------------------- JSON UTILS --------------------
+	"myjson_load",    	#(path)->obj
+	"myjson_dump",    	#(obj,path)
+	"myjson_dumps",   	#(obj)->str
+	"json_merge",		#(to_tree,from_tree)-> None
+	"strip_json_scomments",#(tree,keycom='\1comment')->tree
+# # --------------------- DUMP LOAD --------------------
 	# + сортировка по путям (комментами)
-	"path_patch_dump",#(modified      ,old,new,strict_old,strict_new,touched)->obj
-	"hash_patch_dump",#(modified,moved,old_dirs,new_dirs,old,new    ,touched)->obj
-	#"path_patch_load",#obj->(modified      ,old,new,strict_old,strict_new,touched)
-	"hash_patch_load",#obj->(modified,moved,old_dirs,new_dirs,old,new    ,touched)
+	"fileinfo_compress",#(list)->str
+	"fileinfo_uncompress",#(str)->list
+	"path_patch_dump",	#(modified      ,old,new,strict_old,strict_new,touched)->obj
+	"hash_patch_dump",	#(modified,moved,old_dirs,new_dirs,old,new    ,touched)->obj
+	"path_patch_load",	#obj->(modified      ,old,new,strict_old,strict_new,touched)
+	"hash_patch_load",	#obj->(modified,moved,old_dirs,new_dirs,old,new    ,touched)
+	"action2tree",
+	"tree2action",
+	"moved2pathlist",
+	"pathlist2moved",
+	"statistics",
+	"path_patch_compress",	#(modified      ,old,new,strict_old,strict_new,touched)->obj
+	"hash_patch_compress",	#(modified,moved,old_dirs,new_dirs,old,new    ,touched)->obj
+	"path_patch_uncompress",	#obj->(modified      ,old,new,strict_old,strict_new,touched)
+	"hash_patch_uncompress",	#obj->(modified,moved,old_dirs,new_dirs,old,new    ,touched)
 ]
 
 
-DT = 1 # 1 second between timestamps
+def DT_EQ(t1,t2):
+	t1s = str(t1)
+	t2s = str(t2)
+	t11 = float(t1s[:min(len(t1s),len(t2s))])
+	t22 = float(t2s[:min(len(t1s),len(t2s))])
+	DT = 1 # 1 second between timestamps
+	if t11==t22: return True
+	if abs(t11-t22)<DT: print('too small time delta',t11,t22,'(',t1,t2,')')
+	return False
 
 # # ------------------- UTILS ----------------
 # In[3]:
@@ -86,7 +115,7 @@ def my_path_join_l(ll):
 # In[6]:
 
 
-def tree_iterator(tree):
+def tree_iterator(tree,stopper=lambda k:False):
 	"""проходится по всему дереву
 	на каждом узле(листе) возвращает пару (путь, значение)
 	где путь - список имен, по которым надо добираться по дереву до значения"""
@@ -94,8 +123,8 @@ def tree_iterator(tree):
 		yield (),tree
 		return
 	for k,v in tree.items():
-		if type(v)==dict:
-			for path,v2 in tree_iterator(v):
+		if type(v)==dict and not stopper(k):
+			for path,v2 in tree_iterator(v,stopper):
 				#path.insert(0,k)
 				yield (k,)+path,v2
 		else:
@@ -105,6 +134,20 @@ def tree_iterator(tree):
 #	print(x)
 
 
+def tree_pred_iterator(tree):
+	"""проходится по всему дереву
+	на каждом узле(листе) возвращает тройку (путь, предок, ключ)
+	где путь - список имен, по которым надо добираться по дереву до значения"""
+	assert type(tree)==dict
+	for lk,lv in tree.items():
+		if type(lv)==dict:
+			for path,p,k in tree_pred_iterator(lv):
+				#path.insert(0,k)
+				yield (lk,)+path,p,k
+		else:
+			yield (lk,),tree,lk
+
+			
 # In[7]:
 
 
@@ -118,12 +161,16 @@ def get_subtree(root,path):
 		assert k in tmp, (path,k)
 		tmp = tmp[k]
 	return tmp
-def make_subtree(root,path):
+def make_subdir(root,path):
 	"""берет корень и путь, проходит по пути и создает его, если его нет"""
 	if len(path)==0: return root
 	else: 
 		if path[0] not in root: root[path[0]]={}
-		return make_subtree(root[path[0]],path[1:])
+		return make_subdir(root[path[0]],path[1:])
+def set_subtree(root,path,obj):
+	tmp = make_subdir(root,path[:-1])
+	tmp[path[-1]]=obj
+	
 def is_subpath(subpath,path):
 	"""сначала длинный, потом короткий"""
 	if len(subpath)<len(path):
@@ -133,7 +180,123 @@ def is_subpath(subpath,path):
 			return False
 	return True
 
+def fileinfo_compress(root):
+	assert type(root)==list
+	return str(root[0])+' '+str(root[1])+' '+str(root[2])
+	# root[2] обычно строка, но иногда это None
 
+def fileinfo_uncompress(root):
+	assert type(root)==str
+	# root[2] обычно строка, но иногда это None
+	root = root.split(' ')
+	root[0] = None if root[0]=='None' else float(root[0])
+	root[1] = None if root[1]=='None' else int(root[1])
+	if root[2]=='None': root[2]=None
+	return root
+
+
+# In[18]:
+def nested_join(root,splitter='/',stopper=lambda k:False,leaf_handler=fileinfo_compress):
+	"""поддеревья, в которых содержится один элемент преобразовывает...
+	типа {'a':{'b':1,'c':2,'d':3}} -> {'a/b':1,'a/c':2,'a/d':3}
+	"""
+	if type(root)==dict:
+		new_root = {}
+		for name in root.keys():
+			assert type(name)==str, name
+			tmp_root = root
+			name_path = name
+			while type(tmp_root[name])==dict and len(tmp_root[name])==1 and \
+					not stopper(next(iter(tmp_root[name]))):
+				subname = next(iter(tmp_root[name]))
+				assert type(subname)==str
+				tmp_root = tmp_root[name]
+				name_path+=splitter+subname
+				name = subname
+			new_root[name_path] = nested_join(tmp_root[name],splitter,stopper,leaf_handler)
+		return new_root
+	else:
+		return leaf_handler(root)
+
+
+# In[19]:
+
+
+#nested_join({
+#	'x':{
+#		'y':[1,2,'3'],
+#		#'z':[1,2,'3'],
+#	}
+#})
+
+
+# In[35]:
+
+
+def nested_split(root,splitter='/',del_splitter=True,stopper=lambda k:False,leaf_handler=fileinfo_uncompress):
+	if type(root)==dict:
+		new_root = {}
+		for name in root.keys():
+			assert type(name)==str, name
+			if stopper(name):
+				new_root[name] = root[name]
+			else:
+				tmp = nested_split(root[name],splitter,del_splitter,stopper,leaf_handler)
+				tmp_name = tuple(name.split(splitter))
+				if not del_splitter:
+					if tmp_name[0]=='': tmp_name=tmp_name[1:]
+					tmp_name = tuple(splitter+x for x in tmp_name)
+				while len(tmp_name)>1:
+					tmp = {tmp_name[-1]:tmp}
+					tmp_name = tmp_name[:-1]
+				new_root[tmp_name[0]] = tmp
+		return new_root
+	else:
+		return leaf_handler(root)
+
+def pathlist2tree(ll,ender='\0'):
+	if next(iter(ll)).startswith(ender): return ll
+	tree = {}
+	for p,v in ll.items():
+		p1=(ender+p[0],*p[1:-1],p[-1]+ender) if len(p)>1 else (ender+p[0]+ender,)
+		set_subtree(tree,p1,v)
+	return tree
+
+def tree2pathlist(tree,ender='\0'):
+	if not next(iter(tree)).startswith(ender): return tree
+	ll={}
+	for p,v in tree_iterator(tree,lambda k:k.endswith(ender)):
+		if len(p)>1: ll[(p[0][len(ender):],)+p[1:-1]+(p[-1][:-len(ender)],)] = v
+		else:        ll[(p[0][len(ender):-len(ender)],)] = v
+	return ll
+
+def tree_join(dict_tree,ender='\0'):
+	tree = {}
+	for tree_name,cur_tree in dict_tree.items():
+		for p,v in tree_iterator(cur_tree,lambda k:k.endswith(ender)):
+			assert p[0].startswith(ender)
+			p1=(ender+p[0],*p[1:-1],p[-1]+tree_name) if len(p)>1 else (ender+p[0]+tree_name,)
+			set_tree(tree,p1,v)
+	return tree
+
+import re
+
+def tree_split(tree,ender='\0'):
+	if not next(iter(tree)).startswith(ender+ender): return tree
+	tree_dict = {}
+	def end_checker(k):
+		tmp = re.match('.*'+ender,k)
+		if tmp: return tmp.start()!=0
+		else: return False
+	for p,v in tree_iterator(tree,end_checker(k)):
+		assert p[0].startswith(ender)
+		tree_name = p[-1].split(ender)[1]
+		if len(p)>1: p1 = (p[0][len(ender):],)+p[1:-1]+(p[-1].split(ender)[0]+ender,)
+		else:        p1 = (p[0].split(ender)[2]+ender,)
+		set_tree(tree_dict[tree_name],p1,v)
+	return tree_dict
+	
+		
 # # ------------------- SCAN ------------------------
 # In[2]:
 
@@ -165,13 +328,12 @@ def scan(rootpath,exceptions=set()):
 	total_size = 0
 	ts_printed = 0
 
-	label = HTML()
-	display(label)
+	#label = HTML()
+	#display(label)
 	errors = {}
 	def append(root,path,val):
 		path = path[len(rootpath):].split(os.sep)
-		parent = make_subtree(root,path[:-1])
-		parent[path[-1]] = val
+		set_subtree(root,path,val)
 
 	def scan1(curpath):
 		nonlocal total_size
@@ -193,25 +355,27 @@ def scan(rootpath,exceptions=set()):
 								curroot[entry.name] = [st.st_mtime,st.st_size]
 								total_size+=st.st_size
 							else:
-								print('unknown object:',entry.path)
+								#print('unknown object:',entry.path)
 								append(errors,entry.path,[-1,-1,None])
 					except OSError as e:
 						#print(curpath+os.sep+entry.name)
 						append(errors,curpath+os.sep+entry.name,[-1,-1,None])
-						print(e)
+						#print(e)
 						#print()
 		except OSError as e:
 			#print(curpath+os.sep)
 			append(errors,curpath,{})
-			print(e)
+			#print(e)
 			#print()
 			return {}
 		if ts_printed<int(total_size/1024/1024/1024):
 			ts_printed = int(total_size/1024/1024/1024)
-			label.value = str(ts_printed)+' GB scanned'
+			#label.value = str(ts_printed)+' GB scanned'
+			print(str(ts_printed)+' GB scanned',end='\r')
 		return curroot
 	tmp = scan1(rootpath)
-	label.value = str(ts_printed)+' GB scanned - completed'
+	#label.value = str(ts_printed)+' GB scanned - completed'
+	print(str(ts_printed)+' GB scanned - completed')
 	return tmp, errors
 
 
@@ -235,11 +399,7 @@ def calc_hashes(root,errors,old_root,prefix):
 	total_size = 0
 	calc_size = 0
 	ts_printed = 0
-	label = HTML()
-	def append(root,path,val):
-		parent = make_subtree(root,path[:-1])
-		parent[path[-1]] = val
-
+	#label = HTML()
 	def calc_hashes1(root,old_root,path):
 		nonlocal total_size
 		nonlocal ts_printed
@@ -255,7 +415,7 @@ def calc_hashes(root,errors,old_root,prefix):
 				assert len(root[name])>=2
 				if name in old_root and type(old_root[name])==list and	\
 				  len(old_root[name])>=3 and root[name][1]==old_root[name][1] and \
-				  abs(root[name][0] - old_root[name][0]) < DT : # 1 second between timestamps
+				  DT_EQ(root[name][0],old_root[name][0]): # 1 second between timestamps
 					if len(root[name])==2:
 						root[name].append(old_root[name][2])
 					else:
@@ -275,28 +435,34 @@ def calc_hashes(root,errors,old_root,prefix):
 					except OSError as e:
 						if len(root[name])==2:
 							root[name].append(None)
-						print(p)
-						append(errors,path+(name,),root[name])
-						print(e)
-						print()
+						#print(p)
+						set_subtree(errors,path+(name,),root[name])
+						#print(e)
+						#print()
 					assert type(root[name][1]) == int, path+(name,)
 					calc_size+=root[name][1]
 				if type(root[name][1])==int:
 					total_size+=root[name][1]
 				if ts_printed<int(total_size/1024/1024/1024):
 					ts_printed = int(total_size/1024/1024/1024)
-					label.value = str(ts_printed)+' GB total, '+\
-						str(int(calc_size/1024/1024/1024))+' GB calculated ('+str(int(100*calc_size/total_size))+'%)'
+					#label.value = str(ts_printed)+' GB total, '+\
+					#	str(int(calc_size/1024/1024/1024))+' GB calculated ('+str(int(100*calc_size/total_size))+'%)'
+					print(str(ts_printed)+' GB total, '+\
+						str(int(calc_size/1024/1024/1024))+' GB calculated ('\
+						+str(int(100 - 100*calc_size/total_size))+'% cached)',end='\r')
 			else:
-				raise BaseException(path)
+				raise Exception(path)
 	if old_root!={} and len(root.keys()&old_root.keys())==0:
 		print('intersection root and old_root is void, do nothng, check old_root')
 	else:
 		if old_root=={} : print('calculating from scatch')
-		display(label)
+		#display(label)
 		calc_hashes1(root,old_root,())
-		label.value = str(ts_printed)+' GB calculated, '+\
-			str(int(calc_size/1024/1024/1024))+' GB calculated ('+str(int(100*calc_size/total_size))+'%)- completed'
+		#label.value = str(ts_printed)+' GB calculated, '+\
+		#	str(int(calc_size/1024/1024/1024))+' GB calculated ('+str(int(100*calc_size/total_size))+'%)- completed'
+		print(str(ts_printed)+' GB calculated, '\
+			+str(int(calc_size/1024/1024/1024))+' GB calculated ('\
+			+str(int(100 - 100*calc_size/total_size))+'% cached)- completed')
 
 
 def tree_stat(tree):
@@ -318,9 +484,10 @@ def tree_stat(tree):
 			bad_files+=b
 		return 	(size, dirs, files, bad_files)
 
-	else: raise BaseException()
+	else: raise Exception()
 
 def tree_select(tree,pred):
+	"""оставляет листья, удовлетворяющие предикату"""
 	assert type(tree)==dict
 	new_tree = {}
 	for k,v in tree.items():
@@ -358,6 +525,16 @@ def first_diff(old_root,root):
 
 
 def path_diff(old_root,root):
+	""" Сравнивает 2 дерева, возвращает словари путь:файл/папка
+		modified, - модифицированные файлы
+		old, - файлы и папки, которые присутствуют только в старом дереве
+		new, - файлы и папки, которые присутствуют только в новом дереве
+		strict_old, 
+		strict_new - файлы, которые превратились в папки, и папки, которые превратились в файлы,
+			strict_old - из старого дерева (файл или папка)
+			strict_new - из нового дерева (файл или папка)
+		touched - файлы, у которых изменилось только время доступа
+	"""
 	new = {}
 	old = {}
 	strict_new = {}
@@ -381,7 +558,7 @@ def path_diff(old_root,root):
 					strict_old[path_name] = old_root[name]
 					strict_new[path_name] =	 root[name]
 				elif name in old_root:
-					raise BaseException(path_name)
+					raise Exception(path_name)
 				else:
 					# new dir
 					new[path_name] =	 root[name]
@@ -393,13 +570,13 @@ def path_diff(old_root,root):
 					if root[name][2]!=None and root[name][2]==old_root[name][2]:
 						# same files
 						assert root[name][1]==old_root[name][1], ('different sizes', path_name, root[name][1], old_root[name][1])
-						if abs(root[name][0]-old_root[name][0])>1:
+						if not DT_EQ(root[name][0],old_root[name][0]):
 							touched[path_name] = (old_root[name], root[name])
 					elif root[name][2]==None and root[name][2]==old_root[name][2] and \
-					  root[name][1]==old_root[name][1] and abs(root[name][0] - old_root[name][0]) < DT : # 1 second between timestamps
+					  root[name][1]==old_root[name][1] and DT_EQ(root[name][0],old_root[name][0]): # 1 second between timestamps
 						# same files without hashes
 						assert root[name][1]==old_root[name][1], path_name
-						if abs(root[name][0]-old_root[name][0])>1:
+						if not DT_EQ(root[name][0],old_root[name][0]):
 							touched[path_name] = (old_root[name], root[name])
 					else:
 						# diff files
@@ -410,12 +587,12 @@ def path_diff(old_root,root):
 					strict_new[path_name] =	 root[name]
 					strict_old[path_name] = old_root[name]
 				elif name in old_root:
-					raise BaseException(path_name)
+					raise Exception(path_name)
 				else:
 					# new file
 					new[path_name] =	 root[name]
 			else:
-				raise BaseException(path_name)
+				raise Exception(path_name)
 		for name in old_root.keys():
 			path_name = path+(name,)
 			if name not in root:
@@ -426,7 +603,7 @@ def path_diff(old_root,root):
 					# old file
 					old[path_name] = old_root[name]
 				else:
-					raise BaseException(path_name)
+					raise Exception(path_name)
 	diff1(root,old_root,())
 	return (modified,old,new,strict_old,strict_new,touched)
 
@@ -439,7 +616,7 @@ from copy import *
 nest = 0
 
 def print_lines(arg,caption=None):
-	global nest
+	#global nest
 	if caption!=None:
 		print('  '*nest,caption)
 	for x in arg:
@@ -579,7 +756,7 @@ def make_moved(old_files,new_files,old,new,verbose):
 			for name in fordel:
 				del subtree[name]
 			return None
-		else: raise BaseException(prefix_path)
+		else: raise Exception(prefix_path)
 	#@dvr
 	def move_obj(forced,path,subtree,variants):
 		"""организует перемещение данного объекта, и возвращает, удалось ли это сделать
@@ -623,7 +800,7 @@ def make_moved(old_files,new_files,old,new,verbose):
 			for i in range(1,len(dest_p)+1):
 				if dest_p[:i] in new:
 					break
-			else: raise BaseException(path)
+			else: raise Exception(path)
 			if len(dest_p)==i:
 				to_obj = deepcopy(new[dest_p])
 				del_files_by_tree(new_files,dest_p,new[dest_p])
@@ -644,7 +821,7 @@ def make_moved(old_files,new_files,old,new,verbose):
 				tmp[CHANGED]=True
 				#print('CHANGED',dest_p[:i])
 				for k in range(len(dest_p[i:-1])):
-					assert dest_p[i+k] in tmp, BaseException((dest_p,i+k))
+					assert dest_p[i+k] in tmp, Exception((dest_p,i+k))
 					tmp = tmp[dest_p[i+k]]
 					tmp[CHANGED]=True
 					#print('CHANGED',dest_p[:i+k+1])
@@ -708,9 +885,12 @@ def hash_diff(old,new,verbose=1):
 				#print(p1,p2,tuple(p2))#,p1+tuple(p2))
 				old_files[v[2]].add(p1+p2)
 		return old_files
+	# словари хэш:путь
 	old_files = make_files(old)
 	new_files = make_files(new)
 
+	#print('old_files before:',old_files)
+	#print('new_files before:',new_files)
 	#print_lines(old.keys(),'--- old.keys ---')
 	#print_lines(new.keys(),'--- new.keys ---')
 	#print_lines(old.items(),'--- old.items ---')
@@ -721,8 +901,10 @@ def hash_diff(old,new,verbose=1):
 	# создаю moved, обходя и меняя old и new (несколько раз) (а также old_files и new_files)
 	moved = make_moved(old_files,new_files,old,new,verbose)
 
+	#print('old_files after:',old_files)
+	#print('new_files after:',new_files)
 	#print('-------')
-	#print(myjson_dumps(tree_dump(new)))
+	#print(myjson_dumps(nested_join(new)))
 	#print('-------')
 	#print_lines(moved,'--- moved ---')
 	#print_lines(old.keys(),'--- old.keys ---')
@@ -734,11 +916,11 @@ def hash_diff(old,new,verbose=1):
 	#print('--- checking ---')
 	flag = False
 	for h1 in old_files:
-		if h1 in new_files:
+		if h1!=None and h1 in new_files:
 			flag = True
 			#print(h1)
 	if flag:
-		raise BaseException(h1)
+		raise Exception(h1)
 
 	# раскладываю old, создаю old1, проверяю old_files
 		# целиковые папки остануться целиковыми, их не нужно снова конструировать
@@ -758,7 +940,7 @@ def hash_diff(old,new,verbose=1):
 			elif type(subtree[name])==dict:
 				clear_dir(files,prefix,path+(name,),subtree[name])
 			else:
-				raise BaseException((prefix,path,name,type(subtree[name])))
+				raise Exception((prefix,path,name,type(subtree[name])))
 
 	def q_need_move(files,old1,prefix,path,subtree):
 		"""вызывается от директории или файла
@@ -839,14 +1021,22 @@ def path_patch(old_root,modified,old,new, touched = {}):
 		parent[path[-1]] = deepcopy(new_file)
 	for path,obj in old.items():
 		parent = get_subtree(root,path[:-1])
-		assert parent[path[-1]] == obj
+		assert parent[path[-1]] == obj, (path,(parent[path[-1]],obj))
 		del parent[path[-1]]
 	for path,obj in new.items():
 		parent = get_subtree(root,path[:-1])
-		assert path[-1] not in parent
+		assert path[-1] not in parent, (path,obj)
 		parent[path[-1]] = deepcopy(obj)
 	return root
 
+def path_back_patch(old_root,in_modified,old,new, in_touched = {}):
+	modified = {}
+	for path,v in in_modified.items():
+		modified[path] = (v[1],v[0])
+	touched = {}
+	for path,v in in_touched.items():
+		touched[path] = (v[1],v[0])
+	return path_patch(old_root,modified,new,old,touched)
 
 # In[46]:
 
@@ -912,7 +1102,7 @@ def hash_back_patch(root,in_modified,in_moved,in_old_dirs,in_new_dirs,in_old,in_
 	return hash_patch(root,modified,moved,in_new_dirs,in_old_dirs,in_new,in_old,touched)
 
 	
-# # --------------------- DUMP, LOAD --------------------
+# # --------------------- JSON UTILS --------------------
 # In[10]:
 
 
@@ -923,8 +1113,8 @@ def myjson_load(hash_path):
 	with codecs.open(hash_path,'r', encoding='utf-8') as file:
 		old_root = file.read()
 		old_root = json.loads(old_root)
-		print('readed',hash_path)
-		print(old_root.keys())
+		#print('readed',hash_path)
+		#print(old_root.keys())
 	return old_root
 
 def myjson_dumps(old_root):
@@ -937,15 +1127,14 @@ def myjson_dump(old_root,hash_path):
 			s = myjson_dumps(old_root)
 			file.write(s)
 			print('writed',hash_path)
-	except BaseException as e:
+	except Exception as e:
 		print('start writing with exception',e)
 		with codecs.open(hash_path,'w', encoding='utf-8') as file:
 			s = myjson_dumps(old_root)
 			file.write(s)
 			print('writed',hash_path)
 
-
-def tree_merge(to_tree,from_tree):
+def json_merge(to_tree,from_tree):
 	assert type(to_tree)==dict or type(to_tree)==list, type(to_tree)
 	assert type(to_tree)==type(from_tree), (type(to_tree),type(from_tree))
 	if type(to_tree)==dict:
@@ -957,111 +1146,41 @@ def tree_merge(to_tree,from_tree):
 	elif type(to_tree)==list:
 		for v in from_tree:
 			to_tree.append(v)
-		
-def clear_json_comment(tree):
+
+def strip_json_scomments(tree,keycom='\1comment'):
 	if type(tree)==dict:
-		new_tree = {}
+		if keycom in tree:
+			del tree[keycom]
 		for name in tree:
-			if name.startswith('//block'):
-				for name2 in tree[name]:
-					if name2!='//comment':
-						if name2 in new_tree:
-							tree_merge(new_tree[name2],tree[name][name2])
-						else:
-							new_tree[name2] = tree[name][name2]
-			else:
-				if name in new_tree:
-					tree_merge(new_tree[name],tree[name])
-				else:
-					new_tree[name] = tree[name]
-		return new_tree
+			tree[name] = strip_json_scomments(tree[name],keycom)
 	elif type(tree)==list:
-		new_tree = []
-		for obj in tree:
-			new_tree.append(clear_json_comment(obj))
-		return new_tree
-	else:
-		return tree
+		for name in range(len(tree)):
+			tree[name] = strip_json_scomments(tree[name],keycom)
+	return tree
 		
-# In[18]:
-
-
-def tree_dump(root):
-	if type(root)==list:
-		return str(root[0])+' '+str(root[1])+' '+str(root[2])
-		# root[2] обычно строка, но иногда это None
-	else:
-		new_root = {}
-		for name in root.keys():
-			assert type(name)==str, name
-			tmp_root = root
-			name_path = name
-			while type(tmp_root[name])==dict and len(tmp_root[name])==1:
-				subname = next(iter(tmp_root[name]))
-				assert type(subname)==str
-				tmp_root = tmp_root[name]
-				name_path+='/'+subname
-				name = subname
-			new_root[name_path] = tree_dump(tmp_root[name])
-		return new_root
-
-
-# In[19]:
-
-
-#tree_dump({
-#	'x':{
-#		'y':[1,2,'3'],
-#		#'z':[1,2,'3'],
-#	}
-#})
-
-
-# In[35]:
-
-
-def tree_load(root):
-	if type(root)==str:
-		# root[2] обычно строка, но иногда это None
-		root = root.split(' ')
-		root[0] = None if root[0]=='None' else float(root[0])
-		root[1] = None if root[1]=='None' else int(root[1])
-		if root[2]=='None': root[2]=None
-		return root
-	else:
-		new_root = {}
-		for name in root.keys():
-			assert type(name)==str, name
-			tmp = tree_load(root[name])
-			tmp_name = tuple(name.split('/'))
-			while len(tmp_name)>1:
-				tmp = {tmp_name[-1]:tmp}
-				tmp_name = tmp_name[:-1]
-			new_root[tmp_name[0]] = tmp
-		return new_root
-
+# # --------------------- DUMP, LOAD --------------------
 # In[21]:
 
 
 def path_patch_dump(in_modified,in_old,in_new,in_strict_old,in_strict_new,in_touched):
 	modified = {}
 	for path,v in in_modified.items():
-		modified['/'.join(path)] = (tree_dump(v[0]),tree_dump(v[1]))
+		modified['/'.join(path)] = (nested_join(v[0]),nested_join(v[1]))
 	touched = {}
 	for path,v in in_touched.items():
-		touched['/'.join(path)] = (tree_dump(v[0]),tree_dump(v[1]))
+		touched['/'.join(path)] = (nested_join(v[0]),nested_join(v[1]))
 	old = {}
 	for path,v in in_old.items():
-		old['/'.join(path)] = tree_dump(v)
+		old['/'.join(path)] = nested_join(v)
 	new = {}
 	for path,v in in_new.items():
-		new['/'.join(path)] = tree_dump(v)
+		new['/'.join(path)] = nested_join(v)
 	strict_old = {}
 	for path,v in in_strict_old.items():
-		strict_old['/'.join(path)] = tree_dump(v)
+		strict_old['/'.join(path)] = nested_join(v)
 	strict_new = {}
 	for path,v in in_strict_new.items():
-		strict_new['/'.join(path)] = tree_dump(v)
+		strict_new['/'.join(path)] = nested_join(v)
 	return {
 		'modified':modified,
 		'old':old,
@@ -1071,28 +1190,57 @@ def path_patch_dump(in_modified,in_old,in_new,in_strict_old,in_strict_new,in_tou
 		'touched':touched,
 	}
 
+def path_patch_load(obj):
+	in_modified   = obj["modified"]   if 'modified' in obj else {}
+	in_old        = obj["old"]        if 'old' in obj else {}
+	in_new        = obj["new"]        if 'new' in obj else {}
+	in_strict_old = obj["strict_old"] if 'strict_old' in obj else {}
+	in_strict_new = obj["strict_new"] if 'strict_new' in obj else {}
+	in_touched    = obj["touched"]    if 'touched' in obj else {}
+
+	modified = {}
+	for path,v in in_modified.items():
+		modified[tuple(path.split('/'))] = (nested_split(v[0]),nested_split(v[1]))
+	touched = {}
+	for path,v in in_touched.items():
+		touched[tuple(path.split('/'))] = (nested_split(v[0]),nested_split(v[1]))
+
+	old = {}
+	for path,v in in_old.items():
+		old[tuple(path.split('/'))] = nested_split(v)
+	new = {}
+	for path,v in in_new.items():
+		new[tuple(path.split('/'))] = nested_split(v)
+	strict_old = {}
+	for path,v in in_strict_old.items():
+		strict_old[tuple(path.split('/'))] = nested_split(v)
+	strict_new = {}
+	for path,v in in_strict_new.items():
+		strict_new[tuple(path.split('/'))] = nested_split(v)
+	return (modified,old,new,strict_old,strict_new,touched)
+
 def hash_patch_dump(in_modified,in_moved,in_old_dirs,in_new_dirs,in_old,in_new,in_touched):
 	modified = {}
 	for path,v in in_modified.items():
-		modified['/'.join(path)] = (tree_dump(v[0]),tree_dump(v[1]))
+		modified['/'.join(path)] = (nested_join(v[0]),nested_join(v[1]))
 	touched = {}
 	for path,v in in_touched.items():
-		touched['/'.join(path)] = (tree_dump(v[0]),tree_dump(v[1]))
+		touched['/'.join(path)] = (nested_join(v[0]),nested_join(v[1]))
 	moved = []
 	for from_p,to_p,from_obj,to_obj in in_moved:
-		moved.append(('/'.join(from_p),'/'.join(to_p),tree_dump(from_obj),tree_dump(to_obj)))
+		moved.append(('/'.join(from_p),'/'.join(to_p),nested_join(from_obj),nested_join(to_obj)))
 	old_dirs = {}
 	for path,v in in_old_dirs.items():
-		old_dirs['/'.join(path)] = tree_dump(v)
+		old_dirs['/'.join(path)] = nested_join(v)
 	new_dirs = {}
 	for path,v in in_new_dirs.items():
-		new_dirs['/'.join(path)] = tree_dump(v)
+		new_dirs['/'.join(path)] = nested_join(v)
 	old = {}
 	for path,v in in_old.items():
-		old['/'.join(path)] = tree_dump(v)
+		old['/'.join(path)] = nested_join(v)
 	new = {}
 	for path,v in in_new.items():
-		new['/'.join(path)] = tree_dump(v)
+		new['/'.join(path)] = nested_join(v)
 	return {
 		'modified':modified,
 		'moved':moved,
@@ -1114,26 +1262,199 @@ def hash_patch_load(obj):
 
 	modified = {}
 	for path,v in in_modified.items():
-		modified[tuple(path.split('/'))] = (tree_load(v[0]),tree_load(v[1]))
+		modified[tuple(path.split('/'))] = (nested_split(v[0]),nested_split(v[1]))
 	touched = {}
 	for path,v in in_touched.items():
-		touched[tuple(path.split('/'))] = (tree_load(v[0]),tree_load(v[1]))
+		touched[tuple(path.split('/'))] = (nested_split(v[0]),nested_split(v[1]))
 	moved = []
 	for from_p,to_p,from_obj,to_obj in in_moved:
-		moved.append((tuple(from_p.split('/')),tuple(to_p.split('/')),tree_load(from_obj),tree_load(to_obj)))
+		moved.append((tuple(from_p.split('/')),tuple(to_p.split('/')),nested_split(from_obj),nested_split(to_obj)))
 	old_dirs = {}
 	for path,v in in_old_dirs.items():
-		old_dirs[tuple(path.split('/'))] = tree_load(v)
+		old_dirs[tuple(path.split('/'))] = nested_split(v)
 	new_dirs = {}
 	for path,v in in_new_dirs.items():
-		new_dirs[tuple(path.split('/'))] = tree_load(v)
+		new_dirs[tuple(path.split('/'))] = nested_split(v)
 	old = {}
 	for path,v in in_old.items():
-		old[tuple(path.split('/'))] = tree_load(v)
+		old[tuple(path.split('/'))] = nested_split(v)
 	new = {}
 	for path,v in in_new.items():
-		new[tuple(path.split('/'))] = tree_load(v)
+		new[tuple(path.split('/'))] = nested_split(v)
 	return (modified,moved,old_dirs,new_dirs,old,new,touched)
 	
+def action2tree(actions):
+	tree = {}
+	for action,pathlist in actions.items():
+		for path,data in pathlist.items():
+			set_subtree(tree,tuple('/'+x for x in path.split('/'))+(action,),data)
+	return tree
 	
+def tree2action(tree,ignore={'comment','statistics'}):
+	actions={}
+	for path,data in tree_iterator(tree,lambda x: not x.startswith('/')):
+		if path[-1] in ignore:
+			continue
+		assert not path[-1].startswith('/')
+		if path[-1] not in actions:
+			actions[path[-1]]={}
+		actions[path[-1]][''.join(path[:-1])[1:]] = data
+	return actions
 	
+def moved2pathlist(moved):
+	pathlist = {}
+	for m in moved:
+		p0 = m[0].split('/')
+		p1 = m[1].split('/')
+		for i in range(min(len(p0),len(p1))):
+			if p0[i]!=p1[i]:
+				break
+		M=[ '/'.join(p0[i:]),
+		 '/'.join(p1[i:]), m[2], m[3] ]
+		path = '/'.join(p0[:i])
+		if path not in pathlist:
+			pathlist[path] = []
+		pathlist[path].append(M)
+	return pathlist
+	
+def pathlist2moved(pathlist):
+	moved = []
+	for path,data in pathlist.items():
+		for m in data:
+			m[0] = path+'/'+m[0]
+			m[1] = path+'/'+m[1]
+			moved.append(m)
+	return moved
+	
+def statistics(root,limit=1_000_000_000):
+	def add_stat(o1,o2):
+		o3 = {}
+		for k in o1:
+			t1 = [int(x) for x in o1[k].split(' ')]
+			t2 = [int(x) for x in o2[k].split(' ')]
+			t3=[]
+			for i in range(len(t1)):
+				t3.append(str(t1[i]+t2[i]))
+			o3[k] = ' '.join(t3)
+		return o3
+	assert type(root)==dict
+	st = {'new':'0 0','old':'0 0','modified':'0 0 0','moved':'0','touched':'0'}
+	#print(root)
+	for key in root:
+		#print(key)
+		st2 = {'new':'0 0','old':'0 0','modified':'0 0 0','moved':'0','touched':'0'}
+		if key.startswith('/'):
+			st2 = statistics(root[key],limit)
+		elif key=='new':
+			n=0; s=0
+			#print(key,root[key])
+			if type(root[key])==dict:
+				for p,v in tree_iterator(root[key]):
+					n+=1
+					s+=int(v.split(' ')[1])
+			else:
+				n=1; s=int(root[key].split(' ')[1])
+			st2 = {'new':str(n)+' '+str(s),
+					   'old':'0 0','modified':'0 0 0','moved':'0','touched':'0'}
+		elif key=='old':
+			n=0; s=0
+			if type(root[key])==dict:
+				for p,v in tree_iterator(root[key]):
+					n+=1
+					s-=int(v.split(' ')[1])
+			else:
+				n=1; s=-int(root[key].split(' ')[1])
+			st2 = {'old':str(n)+' '+str(s),
+					   'new':'0 0','modified':'0 0 0','moved':'0','touched':'0'}
+		elif key=='modified':
+			so='-'+root[key][0].split(' ')[1]
+			sn=    root[key][1].split(' ')[1]
+			st2 = {'old':'0 0','new':'0 0','modified':'1 '+sn+' '+so,'moved':'0','touched':'0'}
+		elif key=='touched':
+			st2 = {'old':'0 0','new':'0 0','touched':'1','moved':'0','modified':'0 0 0'}
+		elif key=='moved':
+			n=0
+			for v in root[key]:
+				n+=1
+			st2 = {'old':'0 0',
+					   'new':'0 0','modified':'0 0 0','moved':str(n),'touched':'0'}
+		st = add_stat(st,st2)
+	def prettify(o1):
+		o3 = {}
+		yes = False
+		for k in o1:
+			t1 = [int(x) for x in o1[k].split(' ')]
+			t3=[str(t1[0])]
+			for i in range(1,len(t1)):
+				x=t1[i]
+				#print(x,limit)
+				if abs(x)>limit:
+					yes=True
+				B = abs(x)%1024
+				K = abs(x)//1024%1024
+				M = abs(x)//1024//1024%1024
+				G = abs(x)//1024//1024//1024
+				if G>10:
+					t3.append(str(G)+'Gb')
+				elif G>0:
+					t3.append(str(G)+'Gb'+str(M)+'Mb')
+				elif M>10:
+					t3.append(str(M)+'Mb')
+				elif M>0:
+					t3.append(str(M)+'Mb'+str(K)+'kb')
+				elif K>10:
+					t3.append(str(K)+'kb')
+				elif K>0:
+					t3.append(str(K)+'kb'+str(B)+'b')
+				else:
+					t3.append(str(B)+'b')
+				if x<0:
+					t3[-1]='-'+t3[-1]
+			o3[k] = ' '.join(t3)
+		return o3 if yes else None
+	wst = prettify(st)
+	if wst:
+		root['statistics']= wst
+	return st
+	
+	path_patch_compress
+	path_patch_uncompress
+	hash_patch_compress
+	hash_patch_uncompress
+	
+def path_patch_compress(in_modified,in_old,in_new,in_strict_old,in_strict_new,in_touched):
+	hp = path_patch_dump(in_modified,in_old,in_new,in_strict_old,in_strict_new,in_touched)
+	#hp['moved'] = moved2pathlist(hp['moved'])
+	hp = action2tree(hp)
+	hp = nested_join(hp,'',lambda x: not x.startswith('/'),lambda x:x)
+	statistics(hp,300_000_000)
+	return hp
+
+def path_patch_uncompress(obj):
+	obj = nested_split(obj,'/',False,lambda x: not x.startswith('/'),lambda x:x)
+	obj = tree2action(obj)
+	#obj['moved'] = pathlist2moved(obj['moved'])
+	return path_patch_load(obj)
+
+def hash_patch_compress(in_modified,in_moved,in_old_dirs,in_new_dirs,in_old,in_new,in_touched):
+	hp = hash_patch_dump(in_modified,in_moved,in_old_dirs,in_new_dirs,in_old,in_new,in_touched)
+	hp['moved'] = moved2pathlist(hp['moved'])
+	hp = action2tree(hp)
+	hp = nested_join(hp,'',lambda x: not x.startswith('/'),lambda x:x)
+	statistics(hp,300_000_000)
+	return hp
+
+def hash_patch_uncompress(obj):
+	obj = nested_split(obj,'/',False,lambda x: not x.startswith('/'),lambda x:x)
+	obj = tree2action(obj)
+	
+	if 'modified' not in obj: obj["modified"] = {}
+	if 'moved'    not in obj: obj["moved"]    = {}
+	if 'old_dirs' not in obj: obj["old_dirs"] = {}
+	if 'new_dirs' not in obj: obj["new_dirs"] = {}
+	if 'old'      not in obj: obj["old"]      = {}
+	if 'new'      not in obj: obj["new"]      = {}
+	if 'touched'  not in obj: obj["touched"]  = {}
+
+	obj['moved'] = pathlist2moved(obj['moved'])
+	return hash_patch_load(obj)
