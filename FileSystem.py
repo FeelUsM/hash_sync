@@ -8,6 +8,8 @@
 
 __all__ = [
 # # ------------------- UTILS ----------------
+	"normalize_path",		#(s):
+	"case_normalize_path",	#(s):
 	# seq - tuple or list
 	# path - sequence of str
 	"my_path_join_a", #(*seq)->str
@@ -35,14 +37,18 @@ __all__ = [
 # # ------------------- DIFF --------------
 	"first_diff",     #(old_root,root) -> True or (path,(old,new))
 	"path_diff",      #(old_root,root) -> (modified,old,new,strict_old,strict_new,touched)
-	"hash_diff",      #(old,new)       -> (moved,old_dirs,new_dirs,old,new)
+	"hash_diff1",      #(old,new)       -> (moved,old_dirs,new_dirs,old,new)
 # # ---------------------- PATCH, SYNC -------------------------
-	"path_patch",     #(old_root,modified,old,new, touched = {}) -> new_root
+	"path_patch1",     #(old_root,modified,old,new, touched = {}) -> new_root
 	"hash_patch",     #(old_root,modified,moved,old_dirs,new_dirs,old,new, touched={}) -> new_root
-	"path_back_patch",
+	"path_back_patch1",
 	"hash_back_patch",#(new_root,modified,moved,old_dirs,new_dirs,old,new, touched={}) -> old_root
 	# path_sync
 	# hash_sync
+
+	"path_patch",		#(olderrors,modified,old,new,strict_old,strict_new,touched):
+	"path_back_patch",	#(olderrors,modified,old,new,strict_old,strict_new,touched):
+	"hash_diff",		#(oldroot_d,root_d):
 # # --------------------- JSON UTILS --------------------
 	"myjson_load",    	#(path)->obj
 	"myjson_dump",    	#(obj,path)
@@ -66,6 +72,12 @@ __all__ = [
 	"hash_patch_compress",	#(modified,moved,old_dirs,new_dirs,old,new    ,touched)->obj
 	"path_patch_uncompress",	#obj->(modified      ,old,new,strict_old,strict_new,touched)
 	"hash_patch_uncompress",	#obj->(modified,moved,old_dirs,new_dirs,old,new    ,touched)
+	"load_snapshot",	#(path):
+	"dump_snapshot",	#(errors,root,path):
+# # --------------------- PATCH CHEIN --------------------
+	"diff",				#(old_snap,new_snap):
+	"patch_chain",		#(lst,frm,to,in_snapshot):
+	"check_list",		#(path='.',start = None):
 ]
 
 
@@ -93,7 +105,21 @@ from time import sleep
 #	label.value = str(x)
 #	sleep(0.1)
 
-
+def normalize_path(s):
+	from_pat = re.escape(os.sep+os.sep)+'|'+\
+		re.escape(os.sep+'/')+'|'+\
+		re.escape('/'+os.sep)+'|'+\
+		re.escape('//')
+	to_pat = '/'
+	while re.search(from_pat,s):
+		s = re.sub(from_pat,to_pat,s)
+	return s
+def case_normalize_path(s):
+	s = normalize_path(s)
+	if os.name=='nt':
+		s.upper()
+	return s
+	
 # In[4]:
 
 import os
@@ -300,33 +326,53 @@ def tree_split(tree,ender='\0'):
 # # ------------------- SCAN ------------------------
 # In[2]:
 
+if os.name=='nt':
+	from ctypes import *
+	from ctypes.wintypes import *
 
-from ctypes import *
-from ctypes.wintypes import *
+	FILE_ATTRIBUTE_REPARSE_POINT = 0x00400
+	INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 
-FILE_ATTRIBUTE_REPARSE_POINT = 0x00400
-INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+	kernel32 = WinDLL('kernel32')
+	GetFileAttributesW = kernel32.GetFileAttributesW
+	GetFileAttributesW.restype = DWORD
+	GetFileAttributesW.argtypes = (LPCWSTR,) #lpFileName In
 
-kernel32 = WinDLL('kernel32')
-GetFileAttributesW = kernel32.GetFileAttributesW
-GetFileAttributesW.restype = DWORD
-GetFileAttributesW.argtypes = (LPCWSTR,) #lpFileName In
-
-def is_winlink(path):
-	result = GetFileAttributesW(path)
-	if result == INVALID_FILE_ATTRIBUTES:
-		raise OSError((path,WinError()))
-	return bool(result & FILE_ATTRIBUTE_REPARSE_POINT)
+	def is_winlink(path):
+		result = GetFileAttributesW(path)
+		if result == INVALID_FILE_ATTRIBUTES:
+			raise OSError((path,WinError()))
+		return bool(result & FILE_ATTRIBUTE_REPARSE_POINT)
+elif os.name=='posix':
+	def is_winlink(path):
+		return False
+else:
+	raise Exception('unknown OS name: '+os.name)
 
 #is_winlink(r'D:\Users\feelus\Local Settings')
 
 
 # In[5]:
 
-
+import codecs
+def my_eh_suresc_s2b(err):
+    if err.reason == 'surrogates not allowed':
+        return (repr(err.object[err.start:err.end])[1:-1],err.end)
+    else:
+        return codecs.strict_errors(err)
+codecs.register_error('my_eh_suresc_s2b', my_eh_suresc_s2b)
+def suresc(s):
+    obj = codecs.encode(s, encoding='utf-8', errors='my_eh_suresc_s2b')
+    return codecs.decode(obj,encoding='utf-8')
+	
 def scan(rootpath,exceptions=set()):
 	total_size = 0
 	ts_printed = 0
+	
+	exc1 = set()
+	for n in exceptions:
+		exc1.add(case_normalize_path(n))
+	exceptions = exc1
 
 	#label = HTML()
 	#display(label)
@@ -338,7 +384,7 @@ def scan(rootpath,exceptions=set()):
 	def scan1(curpath):
 		nonlocal total_size
 		nonlocal ts_printed
-		if curpath in exceptions:
+		if case_normalize_path(curpath) in exceptions:
 			return {}
 		curroot = {}
 		#print(curpath)
@@ -346,25 +392,26 @@ def scan(rootpath,exceptions=set()):
 			with os.scandir(curpath) as it:
 				for entry in it:
 					try:
-						if entry.name!='.' and entry.name!='..' and \
+						name = suresc(entry.name)
+						if name!='.' and name!='..' and \
 						 not entry.is_symlink() and not is_winlink(entry.path):
 							if entry.is_dir(follow_symlinks=False):
-								curroot[entry.name] = scan1(entry.path)
+								curroot[name] = scan1(entry.path)
 							elif entry.is_file(follow_symlinks=False):
 								st = entry.stat(follow_symlinks=False)
-								curroot[entry.name] = [st.st_mtime,st.st_size]
+								curroot[name] = [st.st_mtime,st.st_size]
 								total_size+=st.st_size
 							else:
 								#print('unknown object:',entry.path)
-								append(errors,entry.path,[-1,-1,None])
+								append(errors,suresc(entry.path),[-1,-1,None])
 					except OSError as e:
 						#print(curpath+os.sep+entry.name)
-						append(errors,curpath+os.sep+entry.name,[-1,-1,None])
+						append(errors,suresc(curpath)+os.sep+name,[-1,-1,None])
 						#print(e)
 						#print()
 		except OSError as e:
 			#print(curpath+os.sep)
-			append(errors,curpath,{})
+			append(errors,suresc(curpath),{})
 			#print(e)
 			#print()
 			return {}
@@ -861,7 +908,7 @@ def make_moved(old_files,new_files,old,new,verbose):
 # In[16]:
 
 
-def hash_diff(old,new,verbose=1):
+def hash_diff1(old,new,verbose=1):
 	# копирую old, new
 	# создаю old_files, new_files
 	# создаю moved, обходя и меняя old и new (несколько раз) (а также old_files и new_files)
@@ -1001,7 +1048,7 @@ def hash_diff(old,new,verbose=1):
 # перед применением рекомендуется:
 #   проверить, что old и strict_old не пересекаются (по ключам) и объединить их
 #   проверить, что new и strict_new не пересекаются (по ключам) и объединить их
-def path_patch(old_root,modified,old,new, touched = {}):
+def path_patch1(old_root,modified,old,new, touched = {}):
 	# по всем modified
 	#   проверяем, что имеется по старому пути
 	#   и заменяем на новое значение (через parent)
@@ -1029,14 +1076,14 @@ def path_patch(old_root,modified,old,new, touched = {}):
 		parent[path[-1]] = deepcopy(obj)
 	return root
 
-def path_back_patch(old_root,in_modified,old,new, in_touched = {}):
+def path_back_patch1(old_root,in_modified,old,new, in_touched = {}):
 	modified = {}
 	for path,v in in_modified.items():
 		modified[path] = (v[1],v[0])
 	touched = {}
 	for path,v in in_touched.items():
 		touched[path] = (v[1],v[0])
-	return path_patch(old_root,modified,new,old,touched)
+	return path_patch1(old_root,modified,new,old,touched)
 
 # In[46]:
 
@@ -1102,6 +1149,21 @@ def hash_back_patch(root,in_modified,in_moved,in_old_dirs,in_new_dirs,in_old,in_
 	return hash_patch(root,modified,moved,in_new_dirs,in_old_dirs,in_new,in_old,touched)
 
 	
+def path_patch(olderrors,modified,old,new,strict_old,strict_new,touched):
+	return path_patch1(olderrors,modified,{**old,**strict_old},{**new,**strict_new},touched)
+
+def path_back_patch(olderrors,modified,old,new,strict_old,strict_new,touched):
+	return path_back_patch1(olderrors,modified,{**old,**strict_old},{**new,**strict_new},touched)
+
+def hash_diff(oldroot_d,root_d):
+	modified,old,new,strict_old,strict_new,touched = path_diff(oldroot_d,root_d)
+	assert set(old)&set(strict_old) == set()
+	assert set(new)&set(strict_new) == set()
+	moved,old_dirs,new_dirs,old,new = hash_diff1(old,new)
+	assert set(old)&set(strict_old) == set()
+	assert set(new)&set(strict_new) == set()
+	return (modified,moved,old_dirs,new_dirs,{**old,**strict_old},{**new,**strict_new},touched)
+
 # # --------------------- JSON UTILS --------------------
 # In[10]:
 
@@ -1110,7 +1172,7 @@ import json, codecs
 
 def myjson_load(hash_path):
 	"""загружаем хэши, вычисляем хэши, сохраняем хэши"""
-	with codecs.open(hash_path,'r', encoding='utf-8') as file:
+	with codecs.open(hash_path,'r', encoding='utf-8') as file: #, errors='surrogatepass'
 		old_root = file.read()
 		old_root = json.loads(old_root)
 		#print('readed',hash_path)
@@ -1123,13 +1185,13 @@ def myjson_dumps(old_root):
 def myjson_dump(old_root,hash_path):
 	try:
 		print('start writing')
-		with codecs.open(hash_path,'w', encoding='utf-8') as file:
+		with codecs.open(hash_path,'w', encoding='utf-8') as file: #, errors='surrogatepass'
 			s = myjson_dumps(old_root)
 			file.write(s)
 			print('writed',hash_path)
 	except Exception as e:
 		print('start writing with exception',e)
-		with codecs.open(hash_path,'w', encoding='utf-8') as file:
+		with codecs.open(hash_path,'w', encoding='utf-8') as file: #, errors='surrogatepass'
 			s = myjson_dumps(old_root)
 			file.write(s)
 			print('writed',hash_path)
@@ -1253,7 +1315,7 @@ def hash_patch_dump(in_modified,in_moved,in_old_dirs,in_new_dirs,in_old,in_new,i
 
 def hash_patch_load(obj):
 	in_modified = obj["modified"] if 'modified' in obj else {}
-	in_moved    = obj["moved"]    if 'moved' in obj else {}
+	in_moved    = obj["moved"]    if 'moved' in obj else []
 	in_old_dirs = obj["old_dirs"] if 'old_dirs' in obj else {}
 	in_new_dirs = obj["new_dirs"] if 'new_dirs' in obj else {}
 	in_old      = obj["old"]      if 'old' in obj else {}
@@ -1287,7 +1349,11 @@ def action2tree(actions):
 	tree = {}
 	for action,pathlist in actions.items():
 		for path,data in pathlist.items():
-			set_subtree(tree,tuple('/'+x for x in path.split('/'))+(action,),data)
+			if path=='':
+				path = (action,)
+			else:
+				path = tuple('/'+x for x in path.split('/'))+(action,)
+			set_subtree(tree,path,data)
 	return tree
 	
 def tree2action(tree,ignore={'comment','statistics'}):
@@ -1306,6 +1372,7 @@ def moved2pathlist(moved):
 	for m in moved:
 		p0 = m[0].split('/')
 		p1 = m[1].split('/')
+		i=0
 		for i in range(min(len(p0),len(p1))):
 			if p0[i]!=p1[i]:
 				break
@@ -1321,17 +1388,20 @@ def pathlist2moved(pathlist):
 	moved = []
 	for path,data in pathlist.items():
 		for m in data:
-			m[0] = path+'/'+m[0]
-			m[1] = path+'/'+m[1]
-			moved.append(m)
+			if len(m)!=4: 
+				print(path,m)
+			if path == '':
+				moved.append([m[0],m[1], m[2], m[3]])
+			else:
+				moved.append([path+'/'+m[0], path+'/'+m[1], m[2], m[3]])
 	return moved
 	
 def statistics(root,limit=1_000_000_000):
 	def add_stat(o1,o2):
 		o3 = {}
 		for k in o1:
-			t1 = [int(x) for x in o1[k].split(' ')]
-			t2 = [int(x) for x in o2[k].split(' ')]
+			t1 = [0 if x=='None' or x=='-None' else int(x) for x in o1[k].split(' ')]
+			t2 = [0 if x=='None' or x=='-None' else int(x) for x in o2[k].split(' ')]
 			t3=[]
 			for i in range(len(t1)):
 				t3.append(str(t1[i]+t2[i]))
@@ -1351,7 +1421,8 @@ def statistics(root,limit=1_000_000_000):
 			if type(root[key])==dict:
 				for p,v in tree_iterator(root[key]):
 					n+=1
-					s+=int(v.split(' ')[1])
+					x = v.split(' ')[1]
+					s+=0 if x=='None' or x=='-None' else int(x)
 			else:
 				n=1; s=int(root[key].split(' ')[1])
 			st2 = {'new':str(n)+' '+str(s),
@@ -1448,13 +1519,97 @@ def hash_patch_uncompress(obj):
 	obj = nested_split(obj,'/',False,lambda x: not x.startswith('/'),lambda x:x)
 	obj = tree2action(obj)
 	
-	if 'modified' not in obj: obj["modified"] = {}
+	#if 'modified' not in obj: obj["modified"] = {}
 	if 'moved'    not in obj: obj["moved"]    = {}
-	if 'old_dirs' not in obj: obj["old_dirs"] = {}
-	if 'new_dirs' not in obj: obj["new_dirs"] = {}
-	if 'old'      not in obj: obj["old"]      = {}
-	if 'new'      not in obj: obj["new"]      = {}
-	if 'touched'  not in obj: obj["touched"]  = {}
+	#if 'old_dirs' not in obj: obj["old_dirs"] = {}
+	#if 'new_dirs' not in obj: obj["new_dirs"] = {}
+	#if 'old'      not in obj: obj["old"]      = {}
+	#if 'new'      not in obj: obj["new"]      = {}
+	#if 'touched'  not in obj: obj["touched"]  = {}
 
 	obj['moved'] = pathlist2moved(obj['moved'])
 	return hash_patch_load(obj)
+
+def load_snapshot(path):
+	tmp = strip_json_scomments(myjson_load(path))
+	return nested_split(tmp['errors']),nested_split(tmp['root'])
+
+def dump_snapshot(errors,root,path):
+	myjson_dump({
+		'errors':nested_join(errors),
+		'root':nested_join(root)
+	},path)
+
+# # --------------------- PATCH CHEIN --------------------
+
+def check_list(path='.',start = None):
+	ls = os.listdir(path)
+	ols = find_date_file('patch ','.json',ls)
+	r = {}
+	l = {}
+	for s in ols:
+		f,t = s.split(' to ')
+		r[f]=t
+		l[t]=f
+	if not start:
+		start = next(iter(r))
+	lst = [start]
+	while lst[0] in l:
+		cur = lst[0]
+		lst.insert(0,l[cur])
+		del r[l[cur]]
+		del l[cur]
+	while lst[-1] in r:
+		cur = lst[-1]
+		lst.append(r[cur])
+		del l[r[cur]]
+		del r[cur]
+	#assert len(l)==len(r)
+	if len(r)>0:
+		print('осталось',len(r),'переходов')
+	return lst
+	
+def patch_chain(lst,frm,to,in_snapshot):
+	if type(frm)!=int:
+		frm=lst.index(frm)
+	assert frm>=0 and frm<len(lst)
+	if type(to)!=int:
+		to=lst.index(to)
+	assert to>=0 and to<len(lst)
+	errors = in_snapshot['errors']
+	root = in_snapshot['root']
+	print(frm,to)
+	if frm<to: # to right
+		for i in range(frm,to):
+			path = 'patch '+lst[i]+' to '+lst[i+1]+'.json'
+			print(path)
+			patch = myjson_load(path)
+			
+			#e_modified_d,e_old_d,e_new_d,e_strict_old_d,e_strict_new_d,e_touched_d = \
+			#    path_patch_uncompress(patch['errors'])
+			errors = path_patch(errors,*path_patch_uncompress(patch['errors']))
+			
+			#modified_d,moved_d,old_dirs_d,new_dirs_d,old_d,new_d,touched_d = \
+			#    hash_patch_uncompress(patch['root'])
+			root = hash_patch(root,*hash_patch_uncompress(patch['root']))
+
+	elif frm>to: # to left
+		for i in range(frm,to,-1):
+			path = 'patch '+lst[i-1]+' to '+lst[i]+'.json'
+			print('back',path)
+			patch = myjson_load(path)
+			
+			#e_modified_d,e_old_d,e_new_d,e_strict_old_d,e_strict_new_d,e_touched_d = \
+			#    path_patch_uncompress(patch['errors'])
+			errors = path_back_patch(errors,*path_patch_uncompress(patch['errors']))
+			
+			#modified_d,moved_d,old_dirs_d,new_dirs_d,old_d,new_d,touched_d = \
+			#    hash_patch_uncompress(patch['root'])
+			root = hash_back_patch(root,*hash_patch_uncompress(patch['root']))
+	return {'errors':errors,'root':root}
+	
+def diff(old_snap,new_snap):
+	return {
+		'errors':path_patch_compress(*path_diff(old_snap['errors'],new_snap['errors'])),
+		'root':hash_patch_compress(*hash_diff(old_snap['root'],new_snap['root']))
+	}
