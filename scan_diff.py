@@ -21,10 +21,6 @@ import json
 # In[2]:
 
 
-def find_date_file(prefix,postfix,ls):
-	return [s[len(prefix):-len(postfix)] for s in ls if               s.startswith(prefix) and s.endswith(postfix)]
-
-
 from copy import *
 def last_diff_dir(prefix,exclude_dirs=set(),global_log=None):
 	prefix_ = normalize_path(prefix+os.sep)
@@ -55,14 +51,17 @@ def last_diff_dir(prefix,exclude_dirs=set(),global_log=None):
 		os.mkdir('.files')
 		print('create all')
 		with open('.files/log.txt','a') as lf:
-			lf.write(prefix_+'\t'+newtime_s+'\tcreate all\n')
+			lf.write(newtime_s+'\tcreate all\n')
+		if global_log:
+			with open(global_log,'a') as globlog:
+				globlog.write(prefix+'\t'+newtime_s+'\tcreate all\n')
 		# записываем пустое дерево в .bak (дата на минуту раньше текущей)
 		# сканируем-пересчитываем на основе .bak
 		# затем сохраняем новый
+		errors,root = scan(prefix_,exclude_dirs)
+		calc_hashes(errors,root,{},prefix)
+
 		snapshot_json = '.files/last_snapshot '+newtime_s+'.json'
-		oldtime_s = (newtime - timedelta(minutes=1)).strftime(tform)
-		root,errors = scan(prefix_,exclude_dirs)
-		calc_hashes(root,errors,{},prefix)
 		dump_snapshot(errors,root,snapshot_json)
 		
 		return
@@ -91,54 +90,71 @@ def last_diff_dir(prefix,exclude_dirs=set(),global_log=None):
 		log(prefix_+'\t'+newtime_s)
 		snapshot_json = '.files/last_snapshot '+newtime_s+'.json'
 		def find_date_file(prefix,postfix,ls):
-			return [s[len(prefix):-len(postfix)] for s in ls if                       s.startswith(prefix) and s.endswith(postfix)]
-		#if '.files' in os.listdir('.'):
+			return [s[len(prefix):-len(postfix)] for s in ls if  s.startswith(prefix) and s.endswith(postfix)]
+		
 		ls = os.listdir('.files'+os.sep)
-		oldtime_list = find_date_file('last_snapshot ','.bak',ls)
-		assert len(oldtime_list)<=1
-		if len(oldtime_list)==1:
-			oldtime_s = oldtime_list[0]
-			snapshot_bak = '.files/last_snapshot '+oldtime_s+'.bak'
-
-			oldroot,olderrors = load_snapshot(snapshot_bak) # <----
-			newtime_list = find_date_file('last_snapshot ','.json',ls)
-			assert len(newtime_list)<=1
-			if len(newtime_list)==1:
-				print('fast recovery')
-				# сканируем-пересчитываем на основе .json
-				# затем удаляем его и сохраняем новый
-				newtime_s = newtime_list[0]
-				snapshot_json = '.files/last_snapshot '+newtime_s+'.json'
-
-				root,errors = load_snapshot(snapshot_json) # <----
-				#root,errors = scan(prefix_,exclude_dirs)
-				#calc_hashes(root,errors,oldnewroot,prefix)
-
-				#os.remove(oldsnapshot_json)
-				#dump_snapshot(root,errors,snapshot_json) # ---->
-			else:
-				print('recovery')
-				# сканируем-пересчитываем на основе .bak
-				# затем сохраняем новый
-				root,errors = scan(prefix_,exclude_dirs)
-				calc_hashes(root,errors,oldroot,prefix)
-
-				dump_snapshot(root,errors,snapshot_json) # ---->
-		else:
+		bak_list = find_date_file('last_snapshot ','.bak',ls)
+		last_list = find_date_file('last_snapshot ','.json',ls)
+		assert len(bak_list)<=1, bak_list
+		assert len(last_list)<=1, last_list
+		
+		if len(last_list) and len(bak_list): # есть last есть bak
+			# загружаю bak->old 
+			# загружаю last->new
+			print('fast recovery')
+			
+			snapshot_bak = '.files/last_snapshot '+bak_list[0]+'.bak'
+			olderrors,oldroot = load_snapshot(snapshot_bak) # <----
+			
+			snapshot_json = '.files/last_snapshot '+last_list[0]+'.json'
+			errors,root = load_snapshot(snapshot_json) # <----
+			
+		elif len(last_list) and len(bak_list)==0: # есть last нет bak
+			# загружаю last->old
+			# сканирую(old)->new
+			# переименовываю last->bak
+			# записываю new->last
 			print('simple update')
-			# сканируем-пересчитываем на основе json
-			# затем переименовываем его в .bak и сохраняем новый
-			oldtime_list = find_date_file('last_snapshot ','.json',ls)
-			assert len(oldtime_list)==1
-			oldtime_s = oldtime_list[0]
-			snapshot_bak = '.files/last_snapshot '+oldtime_s+'.bak'
+			oldtime_s = last_list[0]
+			
+			snapshot_json = '.files/last_snapshot '+oldtime_s+'.json'
+			olderrors,oldroot = load_snapshot(snapshot_json) # <----
 
-			olderrors,oldroot = load_snapshot('.files/last_snapshot '+oldtime_s+'.json') # <----
-			root,errors = scan(prefix_,exclude_dirs)
-			calc_hashes(root,errors,oldroot,prefix)
+			errors,root = scan(prefix_,exclude_dirs)
+			calc_hashes(errors,root,oldroot,prefix)
+			
+			os.rename(snapshot_json,'.files/last_snapshot '+oldtime_s+'.bak')
 
-			os.rename('.files/last_snapshot '+oldtime_s+'.json',snapshot_bak)
-			dump_snapshot(errors,root,snapshot_json) # ---->
+			dump_snapshot(errors,root,'.files/last_snapshot '+newtime_s+'.json') # ---->
+			
+		elif len(last_list)==0 and len(bak_list): # нет last есть bak
+			# загружаю bak->old
+			# сканирую(old)->new
+			# записываю new->last
+			print('recovery')
+			
+			snapshot_bak = '.files/last_snapshot '+bak_list[0]+'.json'
+			olderrors,oldroot = load_snapshot(snapshot_bak) # <----
+
+			errors,root = scan(prefix_,exclude_dirs)
+			calc_hashes(errors,root,oldroot,prefix)
+			
+			dump_snapshot(errors,root,'.files/last_snapshot '+newtime_s+'.json') # ---->
+			
+		else:# len(last_list)==0 and len(bak_list)==0: # нет last нет bak
+			# сканирую->new
+			# записываю new->last
+			# return
+			print('create')
+			
+			errors,root = scan(prefix_,exclude_dirs)
+			calc_hashes(errors,root,{},prefix)
+
+			snapshot_json = '.files/last_snapshot '+newtime_s+'.json'
+			dump_snapshot(errors,root,snapshot_json)
+			
+			return
+			
 	except BaseException as e:
 		error(Exception('scan:',e));        return
 

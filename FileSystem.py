@@ -121,16 +121,12 @@ def slash_replacer(s):
 	while s[-1]==os.sep:
 		s = s[:-1]
 	return s
-if os.name=='posix':
-	def my_path_join_a(*ll):
-		return os.sep+os.sep.join([slash_replacer(s) for s in ll])
-	def my_path_join_l(ll):
-		return os.sep+os.sep.join([slash_replacer(s) for s in ll])
-else:
-	def my_path_join_a(*ll):
-		return os.sep.join([slash_replacer(s) for s in ll])
-	def my_path_join_l(ll):
-		return os.sep.join([slash_replacer(s) for s in ll])
+def my_path_join_a(*ll):
+	for i in range(1,len(ll)): ll[i] = slash_replacer(ll[i])
+	return os.sep.join(ll)
+def my_path_join_l(ll):
+	for i in range(1,len(ll)): ll[i] = slash_replacer(ll[i])
+	return os.sep.join(ll)
 #my_path_join_a('a:\\c\\','b')
 
 
@@ -360,7 +356,7 @@ def scan(rootpath,exceptions=set()):
 	tmp = scan1(rootpath)
 	#label.value = str(ts_printed)+' GB scanned - completed'
 	print(str(ts_printed)+' GB scanned - completed')
-	return tmp, errors
+	return errors, tmp
 
 
 # In[8]:
@@ -379,7 +375,7 @@ def md5(fname):
 # In[9]:
 
 
-def calc_hashes(root,errors,old_root,prefix):
+def calc_hashes(errors,root,old_root,prefix):
 	total_size = 0
 	calc_size = 0
 	ts_printed = 0
@@ -421,7 +417,7 @@ def calc_hashes(root,errors,old_root,prefix):
 							root[name].append(None)
 						#print(p)
 						set_subtree(errors,path+(name,),root[name])
-						#print(e)
+						print(e)
 						#print()
 					assert type(root[name][1]) == int, path+(name,)
 					calc_size+=root[name][1]
