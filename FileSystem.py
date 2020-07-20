@@ -121,10 +121,16 @@ def slash_replacer(s):
 	while s[-1]==os.sep:
 		s = s[:-1]
 	return s
-def my_path_join_a(*ll):
-	return os.sep.join([slash_replacer(s) for s in ll])
-def my_path_join_l(ll):
-	return os.sep.join([slash_replacer(s) for s in ll])
+if os.name=='posix':
+	def my_path_join_a(*ll):
+		return os.sep+os.sep.join([slash_replacer(s) for s in ll])
+	def my_path_join_l(ll):
+		return os.sep+os.sep.join([slash_replacer(s) for s in ll])
+else:
+	def my_path_join_a(*ll):
+		return os.sep.join([slash_replacer(s) for s in ll])
+	def my_path_join_l(ll):
+		return os.sep.join([slash_replacer(s) for s in ll])
 #my_path_join_a('a:\\c\\','b')
 
 
