@@ -122,11 +122,21 @@ def slash_replacer(s):
 		s = s[:-1]
 	return s
 def my_path_join_a(*ll):
-	for i in range(1,len(ll)): ll[i] = slash_replacer(ll[i])
-	return os.sep.join(ll)
+	l = []
+	if len(ll)>0: 
+		l.append(ll[0])
+		while l[0][-1]==os.sep:
+			l[0] = l[0][:-1]
+	for i in range(1,len(ll)): l.append(slash_replacer(ll[i]))
+	return os.sep.join(l)
 def my_path_join_l(ll):
-	for i in range(1,len(ll)): ll[i] = slash_replacer(ll[i])
-	return os.sep.join(ll)
+	l = []
+	if len(ll)>0: 
+		l.append(ll[0])
+		while l[0][-1]==os.sep:
+			l[0] = l[0][:-1]
+	for i in range(1,len(ll)): l.append(slash_replacer(ll[i]))
+	return os.sep.join(l)
 #my_path_join_a('a:\\c\\','b')
 
 
@@ -521,7 +531,7 @@ def path_diff(old_root,root):
 	strict_old = {}
 	modified = {}
 	touched = {}
-	def diff1(root,old_root,path):
+	def diff1(old_root,root,path):
 		#nonlocal new
 		#nonlocal old
 		#nonlocal modified
@@ -531,7 +541,7 @@ def path_diff(old_root,root):
 			if type(root[name])==dict: # directory
 				if name in old_root and type(old_root[name])==dict:
 					# same dirs
-					diff1(root[name],old_root[name],path_name)
+					diff1(old_root[name],root[name],path_name)
 				elif name in old_root and type(old_root[name])==list:
 					# file -> dir
 					print('warning: file->dir :',my_path_join_a(*path_name))
@@ -584,7 +594,7 @@ def path_diff(old_root,root):
 					old[path_name] = old_root[name]
 				else:
 					raise Exception(path_name)
-	diff1(root,old_root,())
+	diff1(old_root,root,())
 	return (modified,old,new,strict_old,strict_new,touched)
 
 
@@ -1417,7 +1427,7 @@ def dump_snapshot(errors,root,path):
 		'root':nested_join(root)
 	},path)
 
-# # --------------------- PATCH CHEIN --------------------
+# # --------------------- PATCH CHAIN --------------------
 
 def check_list(path='.',start = None):
 	ls = os.listdir(path)

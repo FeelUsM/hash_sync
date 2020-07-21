@@ -102,8 +102,9 @@ def last_diff_dir(prefix,exclude_dirs=set(),global_log=None):
 			# загружаю bak->old 
 			# загружаю last->new
 			print('fast recovery')
+			oldtime_s = bak_list[0]
 			
-			snapshot_bak = '.files/last_snapshot '+bak_list[0]+'.bak'
+			snapshot_bak = '.files/last_snapshot '+oldtime_s+'.bak'
 			olderrors,oldroot = load_snapshot(snapshot_bak) # <----
 			
 			snapshot_json = '.files/last_snapshot '+last_list[0]+'.json'
@@ -123,7 +124,8 @@ def last_diff_dir(prefix,exclude_dirs=set(),global_log=None):
 			errors,root = scan(prefix_,exclude_dirs)
 			calc_hashes(errors,root,oldroot,prefix)
 			
-			os.rename(snapshot_json,'.files/last_snapshot '+oldtime_s+'.bak')
+			snapshot_bak = '.files/last_snapshot '+oldtime_s+'.bak'
+			os.rename(snapshot_json,snapshot_bak)
 
 			dump_snapshot(errors,root,'.files/last_snapshot '+newtime_s+'.json') # ---->
 			
@@ -132,8 +134,9 @@ def last_diff_dir(prefix,exclude_dirs=set(),global_log=None):
 			# сканирую(old)->new
 			# записываю new->last
 			print('recovery')
+			oldtime_s = bak_list[0]
 			
-			snapshot_bak = '.files/last_snapshot '+bak_list[0]+'.json'
+			snapshot_bak = '.files/last_snapshot '+oldtime_s+'.bak'
 			olderrors,oldroot = load_snapshot(snapshot_bak) # <----
 
 			errors,root = scan(prefix_,exclude_dirs)
